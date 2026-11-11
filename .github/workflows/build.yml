@@ -1,0 +1,92 @@
+# Koiffeur FM: build the FM-1 package (.fwsc) on GitHub's servers and publish the browser installer.
+#
+# Upload koiffeur-fm.zip to a GitHub repository (with this file at .github/workflows/build.yml), then:
+#   Actions tab -> "Build Koiffeur FM" runs on every push (or "Run workflow" by hand).
+#   The package is attached to the run as the artifact "koiffeur-fm" (download, unzip: koiffeur-fm-X.Y.fwsc).
+#   With Settings -> Pages -> Source "GitHub Actions", the installer is published at
+#   https://<you>.github.io/<repo>/  (open it in Chrome or Edge with the FM-1 on USB).
+name: Build Koiffeur FM
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: "Also run the host test suite (about 25 minutes)"
+        type: boolean
+        default: false
+
+env:
+  KOI_VERSION: "1.0"                 # the version on the splash and in the file name (X.Y, one digit each)
+  SDK_TAG: AC79NN_SDK_V1.2.1_2023-12-13
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04            # x86-64: JieLi's Linux toolchain runs natively (no Docker)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack the source (uploaded as koiffeur-fm.zip)
+        run: |
+          if [ -f koiffeur-fm.zip ]; then
+            unzip -q koiffeur-fm.zip -d /tmp/src
+            cp -a /tmp/src/koiffeur-fm/. .
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python packages (UI font, icons, textures are made at build time)
+        run: pip install Pillow fonttools
+
+      - name: JieLi toolchain (clang 4.0.1 for pi32v2, from JieLi)
+        run: sh tools/get_toolchain.sh "$HOME/.jieli"
+
+      - name: JieLi AC79 SDK (three of its files go into the package)
+        run: |
+          SDK="$HOME/fw-AC79_AIoT_SDK"
+          SDK_URL=https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git sh firmware/bsp/tools/get_sdk.sh "$SDK" || {
+            echo "sparse fetch refused: a shallow clone of the tag instead"
+            rm -rf "$SDK"
+            git clone --depth 1 --branch "$SDK_TAG" https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git "$SDK"
+          }
+          echo "AC79_SDK=$SDK" >> "$GITHUB_ENV"
+
+      - name: Build (development package, for the tests)
+        run: ./build.sh
+
+      - name: Build (release package)
+        run: ./build.sh --release "$KOI_VERSION"
+
+      - name: Host tests
+        if: ${{ inputs.tests }}
+        run: SANITIZE=0 sh tests/run_tests.sh
+
+      - name: Installer site
+        run: python3 web/make_site.py "build/koiffeur-fm-$KOI_VERSION.fwsc" "$KOI_VERSION" site
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: koiffeur-fm
+          path: build/release-${{ env.KOI_VERSION }}/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  pages:
+    needs: build
+    runs-on: ubuntu-24.04
+    continue-on-error: true          # (Pages not switched on yet: the package above is still there)
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
